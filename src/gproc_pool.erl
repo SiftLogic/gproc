@@ -1,17 +1,19 @@
-%% ``The contents of this file are subject to the Erlang Public License,
-%% Version 1.1, (the "License"); you may not use this file except in
-%% compliance with the License. You should have received a copy of the
-%% Erlang Public License along with this software. If not, it can be
-%% retrieved via the world wide web at http://www.erlang.org/.
+%% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% --------------------------------------------------
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and limitations
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
 %% under the License.
-%%
-%% The Initial Developer of the Original Code is Ericsson Utvecklings AB.
-%% Portions created by Ericsson are Copyright 1999, Ericsson Utvecklings
-%% AB. All Rights Reserved.''
+%% --------------------------------------------------
 %%
 %% @author Ulf Wiger <ulf@wiger.net>
 %%
@@ -507,14 +509,49 @@ try_claim(K, Pid, F) ->
     case gproc:update_counter(K, [0, {1, 1, 1}]) of
         [0, 1] ->
             %% have lock
-            try  Res = F(K, Pid),
-                 {true, Res}
-            after
-                gproc:reset_counter(K)
-            end;
+            execute_claim(F, K, Pid);
         [1, 1] ->
             %% no
             false
+    end.
+
+%% Wrapper to handle the case where the claimant gets killed by another
+%% process while executing within the critical section.
+%% This is likely a rare case, but if it happens, the claim would never
+%% get released.
+%% Solution:
+%% - spawn a monitoring process which resets the claim if the parent dies
+%%   (spawn_link() might be more efficient, but we cannot enable trap_exit
+%%    atomically, which introduces a race condition).
+%% - for all return types, kill the monitor and release the claim.
+%% - the one case where the monitor *isn't* killed is when Parent itself
+%%   is killed before executing the `after' clause. In this case, it should
+%%   be safe to release the claim from the monitoring process.
+%%
+%% Overhead in the normal case:
+%% - spawning the monitoring process
+%% - (possibly scheduling the monitoring process to set up the monitor)
+%% - killing the monitoring process (untrappably)
+%% Timing the overhead over 100,000 claims on a Core i7 MBP running OTP 17,
+%% this wrapper increases the cost of a minimal claim from ca 3 us to
+%% ca 7-8 us.
+execute_claim(F, K, Pid) ->
+    Parent = self(),
+    Mon = spawn(
+            fun() ->
+                    Ref = erlang:monitor(process, Parent),
+                    receive
+                        {'DOWN', Ref, _, _, _} ->
+                            gproc:reset_counter(K)
+                    end
+            end),
+    try begin
+            Res = F(K, Pid),
+            {true, Res}
+        end
+    after
+        exit(Mon, kill),
+        gproc:reset_counter(K)
     end.
 
 setup_wait(nowait, _) ->

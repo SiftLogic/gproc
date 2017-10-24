@@ -1,3 +1,19 @@
+%% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% --------------------------------------------------
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
+%%
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
+%% under the License.
+%% --------------------------------------------------
 -module(gproc_test_lib).
 
 -export([t_spawn/1, t_spawn/2,
@@ -7,7 +23,8 @@
          t_call/2,
          t_loop/0, t_loop/1,
 	 t_pool_contains_atleast/2,
-         got_msg/1, got_msg/2]).
+         got_msg/1, got_msg/2,
+         no_msg/2]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -138,6 +155,18 @@ got_msg(Pb, Tag) ->
 			    erlang:error({timeout, got_msg, [Pb, Tag]})
 		    end
 	    end}).
+
+no_msg(Pb, Timeout) ->
+    t_call(Pb,
+           {apply_fun,
+            fun() ->
+                    receive
+                        M ->
+                            erlang:error({unexpected_msg, M})
+                    after Timeout ->
+                            ok
+                    end
+            end}).
 
 t_pool_contains_atleast(Pool,N)->
     Existing = lists:foldl(fun({_X,_Y},Acc)->

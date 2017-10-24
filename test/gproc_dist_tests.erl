@@ -1,18 +1,19 @@
-%% -*- erlang-indent-level: 4; indent-tabs-mode: nil -*-
-%% ``The contents of this file are subject to the Erlang Public License,
-%% Version 1.1, (the "License"); you may not use this file except in
-%% compliance with the License. You should have received a copy of the
-%% Erlang Public License along with this software. If not, it can be
-%% retrieved via the world wide web at http://www.erlang.org/.
+%% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% --------------------------------------------------
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and limitations
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
 %% under the License.
-%%
-%% The Initial Developer of the Original Code is Ericsson Utvecklings AB.
-%% Portions created by Ericsson are Copyright 1999, Ericsson Utvecklings
-%% AB. All Rights Reserved.''
+%% --------------------------------------------------
 %%
 %% @author Ulf Wiger <ulf@wiger.net>
 %%
@@ -22,106 +23,95 @@
 -include_lib("eunit/include/eunit.hrl").
 -export([t_spawn/1, t_spawn_reg/2]).
 
+-define(f(E), fun() -> ?debugVal(E) end).
+
 dist_test_() ->
     {timeout, 120,
-     [{setup,
-       fun() ->
-               case run_dist_tests() of
-                   true ->
-                       Ns = start_slaves([dist_test_n1, dist_test_n2]),
-                       ?assertMatch({[ok,ok],[]},
-                                    rpc:multicall(Ns, application, set_env,
-                                                  [gproc, gproc_dist, Ns])),
-                       ?assertMatch({[ok,ok],[]},
-                                    rpc:multicall(
-                                      Ns, application, start, [gproc])),
-                       Ns;
-                   false ->
-                       skip
-               end
-       end,
-       fun(_Ns) ->
-               ok
-       end,
-       fun(skip) -> [];
-          (Ns) when is_list(Ns) ->
-               {inorder,
-                [
-                 {inorder, [
-                               fun() ->
-                                       ?debugVal(t_simple_reg(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_simple_reg_or_locate(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_simple_counter(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_aggr_counter(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_awaited_aggr_counter(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_simple_resource_count(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_awaited_resource_count(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_resource_count_on_zero(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_update_counters(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_shared_counter(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_prop(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_mreg(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_await_reg(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_await_self(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_await_reg_exists(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_give_away(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_sync(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_monitor(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_standby_monitor(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_follow_monitor(Ns))
-                               end,
-                               fun() ->
-                                       ?debugVal(t_subscribe(Ns))
-                               end
-                           ]
-                 },
-                 fun() ->
-                         ?debugVal(t_sync_cand_dies(Ns))
-                 end,
-                 {timeout, 90, [fun() ->
-                                        ?debugVal(t_fail_node(Ns))
-                                end]}
-                ]}
-       end
-      }]}.
+     [
+      %% {setup,
+      %%  fun dist_setup/0,
+      %%  fun dist_cleanup/1,
+      %%  fun(skip) -> [];
+      %%     (Ns) when is_list(Ns) ->
+      %%          {inorder, basic_tests(Ns)}
+      %%  end
+      %% },
+      {foreach,
+       fun dist_setup/0,
+       fun dist_cleanup/1,
+       [
+        fun(Ns) ->
+                [{inorder, basic_tests(Ns)}]
+        end,
+        fun(Ns) ->
+                tests(Ns, [?f(t_sync_cand_dies(Ns))])
+        end,
+        fun(Ns) ->
+                tests(Ns, [?f(t_fail_node(Ns))])
+        end,
+        fun(Ns) ->
+                tests(Ns, [{timeout, 10, ?f(t_master_dies(Ns))}])
+        end
+       ]}
+     ]}.
+
+tests(skip, _) ->
+    [];
+tests(_, L) ->
+    L.
+
+basic_tests(skip) ->
+    [];
+basic_tests(Ns) ->
+    [
+     ?f(t_simple_reg(Ns)),
+     ?f(t_simple_reg_other(Ns)),
+     ?f(t_simple_ensure(Ns)),
+     ?f(t_simple_ensure_other(Ns)),
+     ?f(t_simple_reg_or_locate(Ns)),
+     ?f(t_simple_counter(Ns)),
+     ?f(t_aggr_counter(Ns)),
+     ?f(t_awaited_aggr_counter(Ns)),
+     ?f(t_simple_resource_count(Ns)),
+     ?f(t_awaited_resource_count(Ns)),
+     ?f(t_resource_count_on_zero(Ns)),
+     ?f(t_update_counters(Ns)),
+     ?f(t_shared_counter(Ns)),
+     ?f(t_prop(Ns)),
+     ?f(t_mreg(Ns)),
+     ?f(t_await_reg(Ns)),
+     ?f(t_await_self(Ns)),
+     ?f(t_await_reg_exists(Ns)),
+     ?f(t_give_away(Ns)),
+     ?f(t_sync(Ns)),
+     ?f(t_monitor(Ns)),
+     ?f(t_standby_monitor(Ns)),
+     ?f(t_standby_monitor_unreg(Ns)),
+     ?f(t_follow_monitor(Ns)),
+     ?f(t_monitor_demonitor(Ns)),
+     ?f(t_subscribe(Ns))
+    ].
+
+dist_setup() ->
+    case run_dist_tests() of
+        true ->
+            Ns = start_slaves([dist_test_n1, dist_test_n2, dist_test_n3]),
+            ?assertMatch({[ok,ok,ok],[]},
+                         rpc:multicall(Ns, application, set_env,
+                                       [gproc, gproc_dist, Ns])),
+            ?assertMatch({[ok,ok,ok],[]},
+                         rpc:multicall(
+                           Ns, application, start, [gproc])),
+            Ns;
+        false ->
+            skip
+    end.
+
+dist_cleanup(skip) ->
+    ok;
+dist_cleanup(Ns) ->
+    [slave:stop(N) || N <- Ns],
+    ok.
 
 run_dist_tests() ->
     case os:getenv("GPROC_DIST") of
@@ -136,7 +126,7 @@ run_dist_tests() ->
 	    end
     end.
 
--define(T_NAME, {n, g, {?MODULE, ?LINE, erlang:now()}}).
+-define(T_NAME, {n, g, {?MODULE, ?LINE, os:timestamp()}}).
 -define(T_KVL, [{foo, "foo"}, {bar, "bar"}]).
 -define(T_COUNTER, {c, g, {?MODULE, ?LINE}}).
 -define(T_RESOURCE, {r, g, {?MODULE, ?LINE}}).
@@ -149,6 +139,47 @@ t_simple_reg([H|_] = Ns) ->
     ?assertMatch(true, t_call(P, {apply, gproc, unreg, [Name]})),
     ?assertMatch(ok, t_lookup_everywhere(Name, Ns, undefined)),
     ?assertMatch(ok, t_call(P, die)).
+
+t_simple_reg_other([A, B|_] = Ns) ->
+    Name = ?T_NAME,
+    P1 = t_spawn(A),
+    P2 = t_spawn(B),
+    ?assertMatch(true, t_call(P1, {apply, gproc, reg_other, [Name, P2]})),
+    ?assertMatch(ok, t_lookup_everywhere(Name, Ns, P2)),
+    ?assertMatch(true, t_call(P1, {apply, gproc, unreg_other, [Name, P2]})),
+    ?assertMatch(ok, t_lookup_everywhere(Name, Ns, undefined)),
+    ?assertMatch(ok, t_call(P1, die)),
+    ?assertMatch(ok, t_call(P2, die)).
+
+t_simple_ensure([H|_] = Ns) ->
+    Name = ?T_NAME,
+    P = t_spawn_reg(H, Name),
+    ?assertMatch(ok, t_lookup_everywhere(Name, Ns, P)),
+    ?assertMatch(
+       updated, t_call(
+                  P, {apply, gproc, ensure_reg, [Name, new_val, [{a,1}]]})),
+    ?assertMatch(
+       [{a,1}], t_call(
+                  P, {apply, gproc, get_attributes, [Name]})),
+    ?assertMatch(ok, t_read_everywhere(Name, P, Ns, new_val)),
+    ?assertMatch(true, t_call(P, {apply, gproc, unreg, [Name]})),
+    ?assertMatch(ok, t_lookup_everywhere(Name, Ns, undefined)),
+    ?assertMatch(ok, t_call(P, die)).
+
+t_simple_ensure_other([A, B|_] = Ns) ->
+    Name = ?T_NAME,
+    P1 = t_spawn(A),
+    P2 = t_spawn(B),
+    ?assertMatch(true, t_call(P1, {apply, gproc, reg_other, [Name, P2]})),
+    ?assertMatch(ok, t_lookup_everywhere(Name, Ns, P2)),
+    ?assertMatch(
+       updated, t_call(
+                  P1, {apply, gproc, ensure_reg_other, [Name, P2, new_val]})),
+    ?assertMatch(ok, t_read_everywhere(Name, P2, Ns, new_val)),
+    ?assertMatch(true, t_call(P1, {apply, gproc, unreg_other, [Name, P2]})),
+    ?assertMatch(ok, t_lookup_everywhere(Name, Ns, undefined)),
+    ?assertMatch(ok, t_call(P1, die)),
+    ?assertMatch(ok, t_call(P2, die)).
 
 t_simple_reg_or_locate([A,B|_] = _Ns) ->
     Name = ?T_NAME,
@@ -445,15 +476,57 @@ t_standby_monitor([A,B|_] = Ns) ->
     ?assertMatch({gproc,unreg,Ref1,Na}, got_msg(Pc, gproc)),
     ?assertMatch(ok, t_lookup_everywhere(Na, Ns, undefined)).
 
+t_standby_monitor_unreg([A|_] = Ns) ->
+    Na = ?T_NAME,
+    Pa = t_spawn(A, _Selective = true),
+    Ref = t_call(Pa, {apply, gproc, monitor, [Na, standby]}),
+    ?assert(is_reference(Ref)),
+    ?assertMatch({gproc,{failover,Pa},Ref,Na}, got_msg(Pa, gproc)),
+    ?assertMatch(ok, t_lookup_everywhere(Na, Ns, Pa)),
+    ?assertMatch(ok, t_call(Pa, die)),
+    ?assertMatch(ok, t_lookup_everywhere(Na, Ns, undefined)).
+
 t_follow_monitor([A,B|_]) ->
     Na = ?T_NAME,
     Pa = t_spawn(A, _Selective = true),
     Ref = t_call(Pa, {apply, gproc, monitor, [Na, follow]}),
-    {gproc,unreg,Ref,Na} = got_msg(Pa),
+    Msg1 = {gproc,unreg,Ref,Na},
+    {Msg1, Msg1} = {got_msg(Pa), Msg1},
     Pb = t_spawn_reg(B, Na),
-    {gproc,registered,Ref,Na} = got_msg(Pa),
+    Msg2 = {gproc,registered,Ref,Na},
+    {Msg2, Msg2} = {got_msg(Pa), Msg2},
     ok = t_call(Pb, die),
     ok = t_call(Pa, die).
+
+t_monitor_demonitor([A,B|_]) ->
+    Na = ?T_NAME,
+    Pa = t_spawn(A, Selective = true),
+    Pa2 = t_spawn(A, Selective),
+    Pb = t_spawn(B, Selective),
+    Pb2 = t_spawn(B, Selective),
+    RefA = t_call(Pa, {apply, gproc, monitor, [Na, follow]}),
+    RefA2 = t_call(Pa2, {apply, gproc, monitor, [Na, follow]}),
+    RefB = t_call(Pb, {apply, gproc, monitor, [Na, follow]}),
+    RefB2 = t_call(Pb2, {apply, gproc, monitor, [Na, follow]}),
+    Msg1 = {gproc, unreg, RefA, Na},
+    {Msg1, Msg1} = {got_msg(Pa), Msg1},
+    Msg2 = {gproc, unreg, RefA2, Na},
+    {Msg2, Msg2} = {got_msg(Pa2), Msg2},
+    Msg3 = {gproc, unreg, RefB, Na},
+    {Msg3, Msg3} = {got_msg(Pb), Msg3},
+    Msg4 = {gproc, unreg, RefB2, Na},
+    {Msg4, Msg4} = {got_msg(Pb2), Msg4},
+    ok = t_call(Pa, {apply, gproc, demonitor, [Na, RefA]}),
+    ok = t_call(Pb, {apply, gproc, demonitor, [Na, RefB]}),
+    Pr = t_spawn_reg(B, Na),
+    Msg5 = {gproc, registered, RefA2, Na},
+    {Msg5, Msg5} = {got_msg(Pa2), Msg5},
+    Msg6 = {gproc, registered, RefB2, Na},
+    {Msg6, Msg6} = {got_msg(Pb2), Msg6},
+    ok = no_msg(Pa, 500),
+    ok = no_msg(Pb, 500),
+    [ ok = t_call(P, die) || P <- [Pa, Pa2, Pb, Pb2, Pr]],
+    ok.
 
 t_subscribe([A,B|_] = Ns) ->
     Na = ?T_NAME,
@@ -485,11 +558,12 @@ t_subscribe([A,B|_] = Ns) ->
 %% Verify that the gproc_dist:sync() call returns true even if a candidate dies
 %% while the sync is underway. This test makes use of sys:suspend() to ensure that
 %% the other candidate doesn't respond too quickly.
-t_sync_cand_dies([A,B|_]) ->
+t_sync_cand_dies([A,B,C]) ->
     Leader = rpc:call(A, gproc_dist, get_leader, []),
     Other = case Leader of
 		A -> B;
-		B -> A
+		B -> A;
+                C -> A
 	    end,
     ?assertMatch(ok, rpc:call(Other, sys, suspend, [gproc_dist])),
     P = rpc:call(Other, erlang, whereis, [gproc_dist]),
@@ -502,7 +576,12 @@ t_sync_cand_dies([A,B|_]) ->
     %% immediately. Therefore, we should have our answer well within 1 sec.
     ?assertMatch({value, true}, rpc:nb_yield(Key, 1000)).
 
-t_fail_node([A,B|_] = Ns) ->
+
+%% Verify that the registry updates consistently if a non-leader node
+%% dies.
+t_fail_node(Ns) ->
+    Leader = rpc:call(hd(Ns), gproc_dist, get_leader, []),
+    [A,B] = Ns -- [Leader],
     Na = ?T_NAME,
     Nb = ?T_NAME,
     Pa = t_spawn_reg(A, Na),
@@ -516,10 +595,52 @@ t_fail_node([A,B|_] = Ns) ->
     ?assertMatch(ok, t_call(Pa, die)),
     ?assertMatch(ok, t_call(Pb, die)).
 
+t_master_dies([A,B,C] = Ns) ->
+    Na = ?T_NAME,
+    Nb = ?T_NAME,
+    Nc = ?T_NAME,
+    Pa = t_spawn_reg(A, Na),
+    Pb = t_spawn_reg(B, Nb),
+    Pc = t_spawn_reg(C, Nc),
+    L = rpc:call(A, gproc_dist, get_leader, []),
+    ?assertMatch(ok, t_lookup_everywhere(Na, Ns, Pa)),
+    ?assertMatch(ok, t_lookup_everywhere(Nb, Ns, Pb)),
+    ?assertMatch(ok, t_lookup_everywhere(Nc, Ns, Pc)),
+    {Nl, Pl} = case L of
+                   A -> {Na, Pa};
+                   B -> {Nb, Pb};
+                   C -> {Nc, Pc}
+               end,
+    ?assertMatch(true, rpc:call(A, gproc_dist, sync, [])),
+    ?assertMatch(ok, rpc:call(L, application, stop, [gproc])),
+    Names = [{Na,Pa}, {Nb,Pb}, {Nc,Pc}] -- [{Nl, Pl}],
+    RestNs = Ns -- [L],
+    %% ?assertMatch(true, rpc:call(hd(RestNs), gproc_dist, sync, [])),
+    ?assertMatch(true, try_sync(hd(RestNs), RestNs)),
+    ?assertMatch(ok, t_lookup_everywhere(Nl, RestNs, undefined)),
+    [?assertMatch(ok, t_lookup_everywhere(Nx, RestNs, Px))
+     || {Nx, Px} <- Names],
+    ok.
+
+try_sync(N, Ns) ->
+    case rpc:call(N, gproc_dist, sync, []) of
+        {badrpc, _} = Err ->
+            ?debugFmt(
+               "Error in gproc_dist:sync() (~p):~n"
+               "  ~p~n"
+               "Status = ~p~n",
+               [Err, N,
+                {Ns, rpc:multicall([N|Ns], sys, get_status, [gproc_dist])}]),
+            Err;
+        true ->
+            true
+    end.
+
 t_sleep() ->
     timer:sleep(500).
 
 t_lookup_everywhere(Key, Nodes, Exp) ->
+    true = rpc:call(hd(Nodes), gproc_dist, sync, []),
     t_lookup_everywhere(Key, Nodes, Exp, 3).
 
 t_lookup_everywhere(Key, _, Exp, 0) ->
@@ -539,6 +660,7 @@ t_lookup_everywhere(Key, Nodes, Exp, I) ->
     end.
 
 t_read_everywhere(Key, Pid, Nodes, Exp) ->
+    true = rpc:call(hd(Nodes), gproc_dist, sync, []),
     t_read_everywhere(Key, Pid, Nodes, Exp, 3).
 
 t_read_everywhere(Key, _, _, Exp, 0) ->
@@ -570,6 +692,7 @@ t_spawn_reg(Node, N, V, As) -> gproc_test_lib:t_spawn_reg(Node, N, V, As).
 t_spawn_reg_shared(Node, N, V) -> gproc_test_lib:t_spawn_reg_shared(Node, N, V).
 got_msg(P) -> gproc_test_lib:got_msg(P).
 got_msg(P, Tag) -> gproc_test_lib:got_msg(P, Tag).
+no_msg(P, Timeout) -> gproc_test_lib:no_msg(P, Timeout).
 
 t_call(P, Req) ->
     gproc_test_lib:t_call(P, Req).

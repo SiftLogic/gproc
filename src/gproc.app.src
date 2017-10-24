@@ -4,11 +4,15 @@
 
 {application, gproc,
  [
-  {description, "GPROC"},
+  {description, "Extended process registry for Erlang"},
   {vsn, git},
   {id, "GPROC"},
   {registered, [ ] },
   {applications, [ kernel, stdlib ] },
-  {mod, {gproc_app, []} }
+  {mod, {gproc_app, []} },
+
+  {maintainers, ["Ulf Wiger"]},
+  {licenses, ["EPL"]},
+  {links, [{"Github", "https://github.com/uwiger/gproc"}]}
  ]
 }.
