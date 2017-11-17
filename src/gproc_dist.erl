@@ -1,17 +1,19 @@
-%% ``The contents of this file are subject to the Erlang Public License,
-%% Version 1.1, (the "License"); you may not use this file except in
-%% compliance with the License. You should have received a copy of the
-%% Erlang Public License along with this software. If not, it can be
-%% retrieved via the world wide web at http://www.erlang.org/.
+%% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% --------------------------------------------------
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and limitations
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
 %% under the License.
-%%
-%% The Initial Developer of the Original Code is Ericsson Utvecklings AB.
-%% Portions created by Ericsson are Copyright 1999, Ericsson Utvecklings
-%% AB. All Rights Reserved.''
+%% --------------------------------------------------
 %%
 %% @author Ulf Wiger <ulf@wiger.net>
 %%
@@ -23,7 +25,8 @@
 -behaviour(gen_leader).
 
 -export([start_link/0, start_link/1,
-         reg/1, reg/3, unreg/1,
+         reg/1, reg/4, unreg/1,
+         reg_other/5, unreg_other/2,
 	 reg_or_locate/3,
 	 reg_shared/3, unreg_shared/1,
          monitor/2,
@@ -68,8 +71,10 @@
 -record(state, {
           always_broadcast = false,
           is_leader,
+          sync_clients = [],
           sync_requests = []}).
 
+-include("gproc_trace.hrl").
 %% ==========================================================
 %% Start functions
 
@@ -77,7 +82,11 @@ start_link() ->
     start_link({[node()|nodes()], []}).
 
 start_link(all) ->
-    start_link({[node()|nodes()], [{bcast_type, all}]});
+    Workers = case application:get_env(gproc_dist_workers) of
+        {ok, [_|_] = WorkersList} -> WorkersList;
+        _ -> []
+    end,
+    start_link({[node()|nodes()], [{bcast_type, all}, {workers, Workers}]});
 start_link(Nodes) when is_list(Nodes) ->
     start_link({Nodes, []});
 start_link({Nodes, Opts}) ->
@@ -91,7 +100,7 @@ start_link({Nodes, Opts}) ->
 %% {@see gproc:reg/1}
 %%
 reg(Key) ->
-    reg(Key, gproc:default(Key), []).
+    reg(Key, gproc:default(Key), [], reg).
 
 %% {@see gproc:reg_or_locate/2}
 %%
@@ -109,22 +118,50 @@ reg_or_locate(_, _, _) ->
     ?THROW_GPROC_ERROR(badarg).
 
 
-%%% @spec({Class,Scope, Key}, Value) -> true
+%%% @spec({Class,g, Key}, Value) -> true
 %%% @doc
 %%%    Class = n  - unique name
 %%%          | p  - non-unique property
 %%%          | c  - counter
 %%%          | a  - aggregated counter
-%%%    Scope = l | g (global or local)
+%%%          | r  - resource property
+%%%          | rc - resource counter
 %%% @end
-reg({_,g,_} = Key, Value, Attrs) ->
+reg({_,g,_} = Key, Value, Attrs, Op) ->
     %% anything global
-    leader_call({reg, Key, Value, self(), Attrs});
-reg(_, _, _) ->
+    leader_call({reg, Key, Value, self(), Attrs, Op});
+reg(_, _, _, _) ->
+    ?THROW_GPROC_ERROR(badarg).
+
+%% @spec ({Class,g,Key}, pid(), Value, Attrs, Op::reg | unreg) -> true
+%% @doc
+%%    Class = n  - unique name
+%%          | a  - aggregated counter
+%%          | r  - resource property
+%%          | rc - resource counter
+%%    Value = term()
+%%    Attrs = [{Key, Value}]
+%% @end
+reg_other({T,g,_} = Key, Pid, Value, Attrs, Op) when is_pid(Pid) ->
+    if T==n; T==a; T==r; T==rc ->
+            leader_call({reg_other, Key, Value, Pid, Attrs, Op});
+       true ->
+            ?THROW_GPROC_ERROR(badarg)
+    end;
+reg_other(_, _, _, _, _) ->
+    ?THROW_GPROC_ERROR(badarg).
+
+unreg_other({T,g,_} = Key, Pid) when is_pid(Pid) ->
+    if T==n; T==a; T==r; T==rc ->
+            leader_call({unreg_other, Key, Pid});
+       true ->
+            ?THROW_GPROC_ERROR(badarg)
+    end;
+unreg_other(_, _) ->
     ?THROW_GPROC_ERROR(badarg).
 
 reg_shared({_,g,_} = Key, Value, Attrs) ->
-    leader_call({reg, Key, Value, shared, Attrs});
+    leader_call({reg, Key, Value, shared, Attrs, reg});
 reg_shared(_, _, _) ->
     ?THROW_GPROC_ERROR(badarg).
 
@@ -231,7 +268,8 @@ reset_counter(_) ->
 %% @end
 %%
 sync() ->
-    leader_call(sync).
+    %% Increase timeout since gen_leader can take some time ...
+    gen_server:call(?MODULE, sync, 5000).
 
 %% @spec get_leader() -> node()
 %% @doc Returns the node of the current gproc leader.
@@ -248,6 +286,8 @@ handle_cast(_Msg, S, _) ->
 
 handle_call(get_leader, _, S, E) ->
     {reply, gen_leader:leader_node(E), S};
+handle_call(sync, From, S, E) ->
+    {noreply, initiate_sync(From, S, E)};
 handle_call(_, _, S, _) ->
     {reply, badarg, S}.
 
@@ -291,16 +331,16 @@ globs() ->
 surrendered(#state{is_leader = true} = S, {globals, Globs}, _E) ->
     %% Leader conflict!
     surrendered_1(Globs),
-    {ok, S#state{is_leader = false}};
+    {ok, maybe_reinitiate_sync(S#state{is_leader = false})};
 surrendered(S, {globals, Globs}, _E) ->
     %% globals from this node should be more correct in our table than
     %% in the leader's
     surrendered_1(Globs),
-    {ok, S#state{is_leader = false}}.
+    {ok, maybe_reinitiate_sync(S#state{is_leader = false})}.
 
 
-handle_DOWN(Node, S, _E) ->
-    S1 = check_sync_requests(Node, S),
+handle_DOWN(Node, S, E) ->
+    S1 = check_sync_requests(Node, S, E),
     Head = {{{'_',g,'_'},'_'},'$1','_'},
     Gs = [{'==', {node,'$1'},Node}],
     Globs = ets:select(?TAB, [{Head, Gs, [{{{element,1,{element,1,'$_'}},
@@ -312,32 +352,46 @@ handle_DOWN(Node, S, _E) ->
             {ok, Broadcast, S1}
     end.
 
-check_sync_requests(Node, #state{sync_requests = SReqs} = S) ->
-    SReqs1 = lists:flatmap(
-               fun({From, Ns}) ->
-                       case Ns -- [Node] of
-                           [] ->
-                               gen_leader:reply(From, {leader, reply, true}),
-                               [];
-                           Ns1 ->
-                               [{From, Ns1}]
-                       end
-               end, SReqs),
-    S#state{sync_requests = SReqs1}.
+check_sync_requests(Node, #state{sync_requests = SReqs} = S, E) ->
+    check_sync_requests(SReqs, Node, S, E).
 
-handle_leader_call(sync, From, #state{sync_requests = SReqs} = S, E) ->
-    GenLeader = gen_leader,
-    case GenLeader:alive(E) -- [node()] of
-        [] ->
-            {reply, true, S};
-        Alive ->
-            GenLeader:broadcast({from_leader, {sync, From}}, Alive, E),
-            {noreply, S#state{sync_requests = [{From, Alive}|SReqs]}}
-    end;
-handle_leader_call({reg, {_C,g,_Name} = K, Value, Pid, As}, _From, S, _E) ->
-    case gproc_lib:insert_reg(K, Value, Pid, g) of
+check_sync_requests([], _, S, _) ->
+    S;
+check_sync_requests([{From, Ns}|Reqs], Node, S, E) ->
+    case lists:member(Node, Ns) of
+        true ->
+            remove_node_from_sync_request(Node, Ns, From, S, E);
         false ->
+            check_sync_requests(Reqs, Node, S, E)
+    end.
+
+remove_node_from_sync_request(Node, Ns, From, S, E) ->
+    case Ns -- [Node] of
+        [] ->
+            check_sync_requests(Node, send_sync_complete(From, S, E), E);
+        Ns1 ->
+            Rs1 = lists:keyreplace(
+                    From, 1, S#state.sync_requests, {From, Ns1}),
+            %% Yes, we start over and run through the list from the top,
+            %% with updated state; simpler code that way.
+            check_sync_requests(Node, S#state{sync_requests = Rs1}, E)
+    end.
+
+handle_leader_call({Reg, {_C,g,_Name} = K, Value, Pid, As, Op}, _From, S, _E)
+  when Reg==reg; Reg==reg_other ->
+    case gproc_lib:insert_reg(K, Value, Pid, g) of
+        false when Op == reg ->
             {reply, badarg, S};
+        false when Op == ensure ->
+            case ets:lookup(?TAB, ets_key(K, Pid)) of
+                [{_, Pid, _}] ->
+                    gproc_lib:do_set_value(K, Value, Pid),
+                    gproc_lib:insert_attr(K, As, Pid, g),
+                    Vals = mk_broadcast_insert_vals([{K, Pid, Value}]),
+                    {reply, updated, [{insert, Vals}], S};
+                _ ->
+                    {reply, badarg, [], S}
+            end;
         true ->
             _ = gproc_lib:ensure_monitor(Pid,g),
             _ = if As =/= [] ->
@@ -345,7 +399,7 @@ handle_leader_call({reg, {_C,g,_Name} = K, Value, Pid, As}, _From, S, _E) ->
                    true -> []
                 end,
 	    Vals = mk_broadcast_insert_vals([{K, Pid, Value}]),
-            {reply, true, [{insert, Vals}], S}
+            {reply, regged_new(Op), [{insert, Vals}], S}
     end;
 handle_leader_call({monitor, {T,g,_} = K, MPid, Type}, _From, S, _E) when T==n;
                                                                           T==a ->
@@ -398,13 +452,32 @@ handle_leader_call({demonitor, {T,g,_} = K, MPid, Ref}, _From, S, _E) ->
             Opts1 = gproc_lib:remove_monitors(Opts, MPid, Ref),
             Obj = {{Pid,K}, Opts1},
             ets:insert(?TAB, Obj),
-            ets:delete(?TAB, {MPid, K}),
-            {reply, ok, [{delete, [{MPid,K}]},
-                         {insert, [Obj]}], S};
+            Del = case gproc_lib:does_pid_monitor(MPid, Opts1) of
+                      true -> [];
+                      false ->
+                          ets:delete(?TAB, {MPid, K}),
+                          [{delete, [{MPid, K}]}]
+                  end,
+            {reply, ok, Del ++ [{insert, [Obj]}], S};
         [{Key, Waiters}] ->
-            NewWaiters = [W || W <- Waiters,
-                               W =/= {MPid, Ref, follow}],
-            {reply, ok, [{insert, [{Key, NewWaiters}]}], S};
+            case lists:filter(fun({P, R, _}) ->
+                                      P =/= MPid orelse R =/= Ref
+                              end, Waiters) of
+                [] ->
+                    ets:delete(?TAB, {MPid, K}),
+                    ets:delete(?TAB, Key),
+                    {reply, ok, [{delete, [{MPid, K}, Key]}], S};
+                NewWaiters ->
+                    ets:insert(?TAB, {Key, NewWaiters}),
+                    Del = case lists:keymember(MPid, 1, NewWaiters) of
+                              false ->
+                                  ets:delete(?TAB, {MPid, K}),
+                                  [{delete, [{MPid, K}]}];
+                              true ->
+                                  []
+                          end,
+                    {reply, ok, Del ++ [{insert, [{Key, NewWaiters}]}], S}
+            end;
         _ ->
             {reply, ok, S}
     end;
@@ -479,7 +552,9 @@ handle_leader_call({reset_counter, {c,g,_Ctr} = Key, Pid}, _From, S, _E) ->
 	    io:fwrite("reset_counter failed: ~p~n~p~n", [_R, erlang:get_stacktrace()]),
 	    {reply, badarg, S}
     end;
-handle_leader_call({unreg, {T,g,Name} = K, Pid}, _From, S, _E) ->
+handle_leader_call({Unreg, {T,g,Name} = K, Pid}, _From, S, _E)
+  when Unreg==unreg;
+       Unreg==unreg_other->
     Key = if T == n; T == a; T == rc -> {K,T};
              true -> {K, Pid}
           end,
@@ -490,22 +565,22 @@ handle_leader_call({unreg, {T,g,Name} = K, Pid}, _From, S, _E) ->
                     case ets:lookup(?TAB, {{a,g,Name},a}) of
                         [Aggr] ->
                             %% updated by remove_reg/3
-                            {reply, true, [{delete,[Key, {Pid,K}]},
+                            {reply, true, [{delete,[{K,Pid}, {Pid,K}]},
                                            {insert, [Aggr]}], S};
                         [] ->
-                            {reply, true, [{delete, [Key, {Pid,K}]}], S}
+                            {reply, true, [{delete, [{K,Pid}, {Pid,K}]}], S}
                     end;
                T == r ->
                     case ets:lookup(?TAB, {{rc,g,Name},rc}) of
                         [RC] ->
-                            {reply, true, [{delete,[Key, {Pid,K}]},
+                            {reply, true, [{delete,[{K,Pid}, {Pid,K}]},
                                            {insert, [RC]}], S};
                         [] ->
-                            {reply, true, [{delete, [Key, {Pid, K}]}], S}
+                            {reply, true, [{delete, [{K,Pid}, {Pid, K}]}], S}
                     end;
                true ->
                     {reply, true, [{notify, [{K, Pid, unreg}]},
-                                   {delete, [Key, {Pid,K}]}], S}
+                                   {delete, [{K, Pid}, {Pid,K}]}], S}
             end;
         false ->
             {reply, badarg, S}
@@ -528,14 +603,14 @@ handle_leader_call({give_away, {T,g,_} = K, To, Pid}, _From, S, _E)
                     gproc_lib:notify({migrated, ToPid}, K, Opts),
                     {reply, ToPid, [{insert, [{Key, ToPid, Value}]},
                                     {notify, [{K, Pid, {migrated, ToPid}}]},
-				    {delete, [Rev]}], S};
+				    {delete, [{K, Pid}, Rev]}], S};
                 undefined ->
                     ets:delete(?TAB, Key),
                     Rev = {Pid, K},
                     ets:delete(?TAB, Rev),
                     gproc_lib:notify(unreg, K, Opts),
                     {reply, undefined, [{notify, [{K, Pid, unreg}]},
-                                        {delete, [Key, Rev]}], S}
+                                        {delete, [{K, Pid}, Rev]}], S}
             end;
         _ ->
             {reply, badarg, S}
@@ -600,7 +675,18 @@ handle_leader_call({await, Key, Pid}, {_,Ref} = From, S, _E) ->
 handle_leader_call(_, _, S, _E) ->
     {reply, badarg, S}.
 
-handle_leader_cast({sync_reply, Node, Ref}, S, _E) ->
+handle_leader_cast({initiate_sync, Ref}, S, E) ->
+    case gen_leader:alive(E) -- [node()] of
+        [] ->
+            %% ???
+            {noreply, send_sync_complete(Ref, S, E)};
+        Alive ->
+            gen_leader:broadcast({from_leader, {sync, Ref}}, Alive, E),
+            {noreply, S#state{sync_requests =
+                                  [{Ref, Alive}|S#state.sync_requests]}}
+    end;
+
+handle_leader_cast({sync_reply, Node, Ref}, S, E) ->
     #state{sync_requests = SReqs} = S,
     case lists:keyfind(Ref, 1, SReqs) of
         false ->
@@ -612,8 +698,7 @@ handle_leader_cast({sync_reply, Node, Ref}, S, _E) ->
         {_, Ns} ->
             case lists:delete(Node, Ns) of
                 [] ->
-                    gen_leader:reply(Ref, {leader, reply, true}),
-                    {ok, S#state{sync_requests = lists:keydelete(Ref,1,SReqs)}};
+                    {ok, send_sync_complete(Ref, S, E)};
                 Ns1 ->
                     SReqs1 = lists:keyreplace(Ref, 1, SReqs, {Ref, Ns1}),
                     {ok, S#state{sync_requests = SReqs1}}
@@ -739,12 +824,15 @@ filter_standbys([], _) ->
 remove_entry(Key, Pid, Event) ->
     K = ets_key(Key, Pid),
     case ets:lookup(?TAB, K) of
-	[{_, Pid, _}] ->
+	[{_, P, _}] when is_pid(P), P =:= Pid; is_atom(Pid) ->
 	    ets:delete(?TAB, K),
 	    remove_rev_entry(get_opts(Pid, Key), Pid, Key, Event);
 	[{_, _OtherPid, _}] ->
 	    ets:delete(?TAB, {Pid, Key}),
 	    [];
+        [{_, _Waiters}] ->
+            ets:delete(?TAB, K),
+            [];
 	[] -> []
     end.
 
@@ -773,6 +861,16 @@ terminate(_Reason, _S) ->
 from_leader({sync, Ref}, S, _E) ->
     gen_leader:leader_cast(?MODULE, {sync_reply, node(), Ref}),
     {ok, S};
+from_leader({sync_complete, Ref}, S, _E) ->
+    case Ref of
+        {From, _} when node(From) == node() ->
+            {ok, reply_to_sync_client(Ref, S)};
+        _ ->
+            %% we shouldn't have to, but ensure that we don't have
+            %% the sync request in our state.
+            {ok, S#state{sync_requests = lists:keydelete(
+                                           Ref, 1, S#state.sync_requests)}}
+    end;
 from_leader(Ops, S, _E) ->
     lists:foreach(
       fun({delete, Globals}) ->
@@ -791,7 +889,10 @@ insert_globals(Globals) ->
 	      ets:insert_new(?TAB, {{Pid,Key}, []}),
 	      gproc_lib:ensure_monitor(Pid,g),
 	      A;
-	 ({{P,_K}, Opts} = Obj, A) when is_pid(P), is_list(Opts),Opts =/= [] ->
+         ({{{_,_,_},_}, _} = Obj, A) ->
+              ets:insert(?TAB, Obj),
+              A;
+         ({{P,_K}, Opts} = Obj, A) when is_pid(P), is_list(Opts) ->
 	      ets:insert(?TAB, Obj),
 	      gproc_lib:ensure_monitor(P,g),
 	      [Obj] ++ A;
@@ -802,14 +903,19 @@ insert_globals(Globals) ->
 
 delete_globals(Globals) ->
     lists:foreach(
-      fun({{_,g,_},T} = K) when is_atom(T); is_pid(T) ->
-              ets:delete(?TAB, K);
+      fun({{_,g,_} = K, T}) when is_atom(T); is_pid(T) ->
+              remove_entry(K, T, []);
+         ({{{_,g,_} = K, T}, P}) when is_pid(P), is_atom(T);
+                                          is_pid(P), is_pid(T) ->
+	      remove_entry(K, P, []);
          ({Pid, Key}) when is_pid(Pid); Pid==shared ->
 	      ets:delete(?TAB, {Pid, Key})
       end, Globals).
 
-do_notify([{P, Msg}|T]) when is_pid(P) ->
+do_notify([{P, Msg}|T]) when is_pid(P), node(P) =:= node() ->
     P ! Msg,
+    do_notify(T);
+do_notify([{P, _Msg}|T]) when is_pid(P) ->
     do_notify(T);
 do_notify([{K, P, E}|T]) ->
     case ets:lookup(?TAB, {P,K}) of
@@ -833,6 +939,12 @@ leader_call(Req) ->
         Reply  -> Reply
     end.
 
+%% leader_call(Req, Timeout) ->
+%%     case gen_leader:leader_call(?MODULE, Req, Timeout) of
+%%         badarg -> ?THROW_GPROC_ERROR(badarg);
+%%         Reply  -> Reply
+%%     end.
+
 leader_cast(Msg) ->
     gen_leader:leader_cast(?MODULE, Msg).
 
@@ -846,8 +958,9 @@ surrendered_1(Globs) ->
     My_local_globs =
         ets:select(?TAB, [{{{{'_',g,'_'},'_'},'$1', '$2'},
                            [{'==', {node,'$1'}, node()}],
-                           [{{ {element,1,{element,1,'$_'}}, '$1', '$2' }}]}]),
+                           [{{ {element,1,'$_'}, '$1', '$2' }}]}]),
     _ = [gproc_lib:ensure_monitor(Pid, g) || {_, Pid, _} <- My_local_globs],
+    ?event({'My_local_globs', My_local_globs}),
     %% remove all remote globals.
     ets:select_delete(?TAB, [{{{{'_',g,'_'},'_'}, '$1', '_'},
                               [{'=/=', {node,'$1'}, node()}],
@@ -870,6 +983,7 @@ surrendered_1(Globs) ->
              ({_, Pid, _} = Obj, Acc) when node(Pid) == node() ->
                   [Obj|Acc]
           end, [], Globs),
+    ?event({'Ldr_local_globs', Ldr_local_globs}),
     case [{K,P,V} || {K,P,V} <- My_local_globs,
 		     is_pid(P) andalso
 			 not(lists:keymember(K, 1, Ldr_local_globs))] of
@@ -878,14 +992,16 @@ surrendered_1(Globs) ->
             ok;
         [_|_] = Missing ->
             %% This is very unlikely, I think
+            ?event({'Missing', Missing}),
             leader_cast({add_globals, mk_broadcast_insert_vals(Missing)})
     end,
-    case [{K,P} || {K,P,_} <- Ldr_local_globs,
+    case [{K,P} || {{K,_}=R,P,_} <- Ldr_local_globs,
 		   is_pid(P) andalso
-		       not(lists:keymember(K, 1, My_local_globs))] of
+		       not(lists:keymember(R, 1, My_local_globs))] of
         [] ->
             ok;
         [_|_] = Remove ->
+            ?event({'Remove', Remove}),
             leader_cast({remove_globals, Remove})
     end.
 
@@ -983,7 +1099,10 @@ pid_to_give_away_to({T,g,_} = Key) when T==n; T==a ->
 
 insert_reg([{_, Waiters}], K, Val, Pid, Event) ->
     gproc_lib:insert_reg(K, Val, Pid, g),
-    tell_waiters(Waiters, K, Pid, Val, Event).
+    tell_waiters(Waiters, K, Pid, Val, Event);
+insert_reg([], K, Val, Pid, Event) ->
+    gproc_lib:insert_reg(K, Val, Pid, g),
+    tell_waiters([], K, Val, Pid, Event).
 
 tell_waiters([{P,R}|T], K, Pid, V, Event) ->
     Msg = {gproc, R, registered, {K, Pid, V}},
@@ -1004,13 +1123,66 @@ tell_waiters([], _, _, _, _) ->
 
 add_follow_to_waiters(Waiters, {T,_,_} = K, Pid, Ref, S) ->
     Obj = {{K,T}, [{Pid, Ref, follow}|Waiters]},
-    Rev = {{Pid,K}, []},
-    ets:insert(?TAB, [Obj, Rev]),
+    ets:insert(?TAB, Obj),
+    Rev = ensure_rev({Pid, K}),
     Msg = {gproc, unreg, Ref, K},
-    if node(Pid) == node() ->
+    if node(Pid) =:= node() ->
             Pid ! Msg,
             {reply, Ref, [{insert, [Obj, Rev]}], S};
        true ->
             {reply, Ref, [{insert, [Obj, Rev]},
                           {notify, [{Pid, Msg}]}], S}
     end.
+
+ensure_rev(K) ->
+    case ets:lookup(?TAB, K) of
+        [Rev] ->
+            Rev;
+        [] ->
+            Rev = {K, []},
+            ets:insert(?TAB, Rev),
+            Rev
+    end.
+
+regged_new(reg   ) -> true;
+regged_new(ensure) -> new.
+
+
+initiate_sync(From, #state{is_leader = true} = S, E) ->
+    case gen_leader:alive(E) -- [node()] of
+        [] ->
+            %% I'm alone - sync is trivial
+            gen_server:reply(From, true),
+            S;
+        Alive ->
+            gen_leader:broadcast(
+              {from_leader, {sync, From}}, Alive, E),
+            S#state{sync_requests =
+                        [{From, Alive}|S#state.sync_requests]}
+    end;
+initiate_sync(From, S, _E) ->
+    leader_cast({initiate_sync, From}),
+    S.
+
+maybe_reinitiate_sync(#state{sync_clients = []} = S) ->
+    S;
+maybe_reinitiate_sync(#state{sync_clients = Cs} = S) ->
+    _ = [leader_cast({initiate_sync, From}) || From <- Cs],
+    S.
+
+send_sync_complete({From, _} = Ref, S, _E) when node(From) == node() ->
+    reply_to_sync_client(Ref, S);
+send_sync_complete({From, _} = Ref, S, E) ->
+    %% Notify the node that initiated the sync
+    %% 'broadcasting' to exactly one node.
+    gen_leader:broadcast(
+      {from_leader, {sync_complete, Ref}}, [node(From)], E),
+    S#state{sync_requests =
+                lists:keydelete(Ref, 1, S#state.sync_requests)}.
+
+reply_to_sync_client(Ref, S) ->
+    gen_server:reply(Ref, true),
+    S#state{sync_clients =
+                S#state.sync_clients -- [Ref],
+            sync_requests =
+                lists:keydelete(Ref, 1, S#state.sync_requests)}.

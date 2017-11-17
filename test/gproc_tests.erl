@@ -1,17 +1,19 @@
-%% ``The contents of this file are subject to the Erlang Public License,
-%% Version 1.1, (the "License"); you may not use this file except in
-%% compliance with the License. You should have received a copy of the
-%% Erlang Public License along with this software. If not, it can be
-%% retrieved via the world wide web at http://www.erlang.org/.
+%% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% --------------------------------------------------
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and limitations
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
 %% under the License.
-%%
-%% The Initial Developer of the Original Code is Ericsson Utvecklings AB.
-%% Portions created by Ericsson are Copyright 1999, Ericsson Utvecklings
-%% AB. All Rights Reserved.''
+%% --------------------------------------------------
 %%
 %% @author Ulf Wiger <ulf@wiger.net>
 %%
@@ -73,6 +75,14 @@ reg_test_() ->
      end,
      [
       {spawn, ?_test(?debugVal(t_simple_reg()))}
+      , ?_test(t_is_clean())
+      , {spawn, ?_test(?debugVal(t_simple_reg_other()))}
+      , ?_test(t_is_clean())
+      , ?_test(?debugVal(t_simple_ensure()))
+      , ?_test(t_is_clean())
+      , ?_test(?debugVal(t_simple_ensure_other()))
+      , ?_test(t_is_clean())
+      , ?_test(?debugVal(t_simple_ensure_prop()))
       , ?_test(t_is_clean())
       , {spawn, ?_test(?debugVal(t_simple_reg_or_locate()))}
       , ?_test(t_is_clean())
@@ -144,6 +154,8 @@ reg_test_() ->
       , ?_test(t_is_clean())
       , {spawn, ?_test(?debugVal(t_monitor_follow()))}
       , ?_test(t_is_clean())
+      , {spawn, ?_test(?debugVal(t_monitor_demonitor()))}
+      , ?_test(t_is_clean())
       , {spawn, ?_test(?debugVal(t_subscribe()))}
       , ?_test(t_is_clean())
       , {spawn, ?_test(?debugVal(t_gproc_info()))}
@@ -157,6 +169,70 @@ t_simple_reg() ->
     ?assert(gproc:where({n,l,name}) =:= self()),
     ?assert(gproc:unreg({n,l,name}) =:= true),
     ?assert(gproc:where({n,l,name}) =:= undefined).
+
+t_simple_reg_other() ->
+    P = self(),
+    P1 = spawn_link(fun() ->
+                            receive
+                                {P, goodbye} -> ok
+                            end
+                    end),
+    Ref = erlang:monitor(process, P1),
+    ?assert(gproc:reg_other({n,l,name}, P1) =:= true),
+    ?assert(gproc:where({n,l,name}) =:= P1),
+    ?assert(gproc:unreg_other({n,l,name}, P1) =:= true),
+    ?assert(gproc:where({n,l,name}) =:= undefined),
+    P1 ! {self(), goodbye},
+    receive
+        {'DOWN', Ref, _, _, _} ->
+            ok
+    end.
+
+t_simple_ensure() ->
+    P = self(),
+    Key = {n,l,name},
+    ?assert(gproc:reg(Key) =:= true),
+    ?assert(gproc:where(Key) =:= P),
+    ?assert(gproc:ensure_reg(Key, new_val, [{a,1}]) =:= updated),
+    ?assert(gproc:get_attributes(Key) =:= [{a,1}]),
+    ?assert(gproc:unreg(Key) =:= true),
+    ?assert(gproc:where(Key) =:= undefined).
+
+t_simple_ensure_other() ->
+    P = self(),
+    Key = {n,l,name},
+    P1 = spawn_link(fun() ->
+                            receive
+                                {P, goodbye} -> ok
+                            end
+                    end),
+    Ref = erlang:monitor(process, P1),
+    ?assert(gproc:reg_other(Key, P1) =:= true),
+    ?assert(gproc:where(Key) =:= P1),
+    ?assert(gproc:ensure_reg_other(Key, P1, new_val, [{a,1}]) =:= updated),
+    ?assert(gproc:get_value(Key, P1) =:= new_val),
+    ?assert(gproc:get_attributes(Key, P1) =:= [{a,1}]),
+    ?assert(gproc:unreg_other(Key, P1) =:= true),
+    ?assert(gproc:where({n,l,name}) =:= undefined),
+    P1 ! {self(), goodbye},
+    receive
+        {'DOWN', Ref, _, _, _} ->
+            ok
+    end.
+
+t_simple_ensure_prop() ->
+    Key = {p,l,?LINE},
+    P = self(),
+    Select = fun() ->
+                     gproc:select({l,p}, [{ {Key,'_','_'},[],['$_'] }])
+             end,
+    ?assertMatch(new, gproc:ensure_reg(Key, first_val, [])),
+    ?assertMatch([{Key,P,first_val}], Select()),
+    ?assertMatch(updated, gproc:ensure_reg(Key, new_val, [{a,1}])),
+    ?assertMatch([{Key,P,new_val}], Select()),
+    ?assertMatch([{a,1}], gproc:get_attributes(Key)),
+    ?assertMatch(true, gproc:unreg(Key)),
+    ?assertMatch([], Select()).
 
 t_simple_reg_or_locate() ->
     P = self(),
@@ -392,8 +468,10 @@ t_is_clean() ->
     sys:get_status(gproc_monitor),
     T = ets:tab2list(gproc),
     Tm = ets:tab2list(gproc_monitor),
+    ?debugFmt("self() = ~p~n", [self()]),
     ?assertMatch([], Tm),
-    ?assertMatch([], T -- [{{whereis(gproc_monitor), l}}]).
+    ?assertMatch([], T -- [{{whereis(gproc_monitor), l}},
+                           {{self(), l}}]).
 
 t_simple_mreg() ->
     P = self(),
@@ -840,6 +918,21 @@ t_monitor_follow() ->
     {gproc,{failover,P3},Ref,Name} = got_msg(P1),
     {gproc,{failover,P3},Ref3,Name} = got_msg(P3),
     [exit(P,kill) || P <- [P1,P3]],
+    ok.
+
+t_monitor_demonitor() ->
+    Name = ?T_NAME,
+    P1 = t_spawn(Selective = true),
+    Ref = t_call(P1, {apply, gproc, monitor, [Name, follow]}),
+    {gproc, unreg, Ref, Name} = got_msg(P1),
+    ok = t_call(P1, {apply, gproc, demonitor, [Name, Ref]}),
+    P2 = t_spawn(Selective),
+    Ref2 = t_call(P2, {apply, gproc, monitor, [Name, follow]}),
+    {gproc, unreg, Ref2, Name} = got_msg(P2),
+    P3 = t_spawn_reg(Name),
+    {gproc, registered, Ref2, Name} = got_msg(P2),
+    ok = gproc_test_lib:no_msg(P1, 300),
+    [exit(P, kill) || P <- [P1, P2, P3]],
     ok.
 
 t_subscribe() ->

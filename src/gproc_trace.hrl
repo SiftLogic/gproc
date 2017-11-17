@@ -14,9 +14,8 @@
 %% specific language governing permissions and limitations
 %% under the License.
 %% --------------------------------------------------
-%%
-%% @author Ulf Wiger <ulf@wiger.net>
-%%
-%% gproc.hrl: Common definitions
+-define(event(E), event(?LINE, E, [])).
+-define(event(E, S), event(?LINE, E, S)).
 
--define(TAB, gproc).
+event(_L, _E, _S) ->
+    ok.
